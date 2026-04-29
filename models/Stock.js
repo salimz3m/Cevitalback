@@ -9,7 +9,7 @@ const Stock = sequelize.define(
     productName: { type: DataTypes.STRING, allowNull: false },
     availableQty: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 0 },
     unit: { type: DataTypes.STRING, defaultValue: "unité" },
-    depotId: { type: DataTypes.INTEGER, allowNull: true },
+    depotId: { type: DataTypes.INTEGER, references: null, allowNull: true },
     companyId: { type: DataTypes.INTEGER, allowNull: false },
     lastUpdated: { type: DataTypes.DATE, defaultValue: DataTypes.NOW },
   },
