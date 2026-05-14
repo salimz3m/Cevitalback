@@ -7,7 +7,6 @@ const Order = sequelize.define(
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     orderNumber: { type: DataTypes.STRING, allowNull: false, unique: true },
     date: { type: DataTypes.DATEONLY, allowNull: false },
-    // Statuts : 'pending' | 'planned' | 'in_transit' | 'delivered' | 'cancelled'
     status: {
       type: DataTypes.ENUM(
         "pending",
@@ -19,11 +18,20 @@ const Order = sequelize.define(
       defaultValue: "pending",
     },
     companyId: { type: DataTypes.INTEGER, allowNull: false },
-    createdBy: { type: DataTypes.INTEGER }, // userId
-    // Verrouillage concurrent (Phase 2 CDC)
-    lockedBy: { type: DataTypes.INTEGER, allowNull: true }, // userId qui a le verrou
-    lockedAt: { type: DataTypes.DATE, allowNull: true }, // timestamp du verrou
+    createdBy: { type: DataTypes.INTEGER },
+    lockedBy: { type: DataTypes.INTEGER, allowNull: true },
+    lockedAt: { type: DataTypes.DATE, allowNull: true },
     notes: { type: DataTypes.TEXT },
+
+    // ── Sprint 10 ──
+    source: {
+      type: DataTypes.ENUM("EXCEL", "MANUELLE", "API"),
+      defaultValue: "EXCEL",
+    },
+    codeCommande: { type: DataTypes.STRING(80), allowNull: true },
+    codeClient: { type: DataTypes.STRING(80), allowNull: true },
+    famille: { type: DataTypes.STRING(80), allowNull: true },
+    clrCode: { type: DataTypes.STRING(80), allowNull: true },
   },
   { timestamps: true },
 );

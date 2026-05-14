@@ -1,6 +1,6 @@
 // routes/modules/transport-intel.js — Sprint 5
 const express = require("express");
-const router  = express.Router();
+const router = express.Router();
 const { authenticate, authorize } = require("../../middleware/auth");
 const {
   getSuggestions,
@@ -12,7 +12,12 @@ const {
 } = require("../../services/modules/transportOptimizer");
 
 const CAN_TRANSPORT = ["admin", "transport"];
+const { requireModule } = require("../../middleware/moduleGate");
 
+// Bon ordre
+router.use(authenticate);
+router.use(authorize(...CAN_TRANSPORT));
+router.use(requireModule("TRANSPORT_INTEL"));
 // ─────────────────────────────────────────────────────────────
 // GET /api/modules/transport-intel/suggestions
 // Dashboard complet : alertes + regroupement + prestataires + KPI
@@ -29,7 +34,7 @@ router.get(
       console.error("[transport-intel] getSuggestions:", err);
       res.status(500).json({ message: "Erreur module transport intelligent" });
     }
-  }
+  },
 );
 
 // ─────────────────────────────────────────────────────────────
@@ -47,7 +52,7 @@ router.get(
     } catch (err) {
       res.status(500).json({ message: "Erreur module regroupement" });
     }
-  }
+  },
 );
 
 // ─────────────────────────────────────────────────────────────
@@ -65,7 +70,7 @@ router.get(
     } catch (err) {
       res.status(500).json({ message: "Erreur module prestataires" });
     }
-  }
+  },
 );
 
 // ─────────────────────────────────────────────────────────────
@@ -83,7 +88,7 @@ router.get(
     } catch (err) {
       res.status(500).json({ message: "Erreur module alertes" });
     }
-  }
+  },
 );
 
 // ─────────────────────────────────────────────────────────────
@@ -101,7 +106,7 @@ router.get(
     } catch (err) {
       res.status(500).json({ message: "Erreur module performance" });
     }
-  }
+  },
 );
 
 // ─────────────────────────────────────────────────────────────
@@ -122,23 +127,24 @@ router.post(
       let statsPrestataire = null;
       if (prestataire) {
         const { prestataires } = await scorerPrestataires(req.user.companyId);
-        statsPrestataire = prestataires.find(
-          (p) => p.nom.toLowerCase() === prestataire.toLowerCase()
-        ) || null;
+        statsPrestataire =
+          prestataires.find(
+            (p) => p.nom.toLowerCase() === prestataire.toLowerCase(),
+          ) || null;
       }
 
       const estimation = estimerCoutDelai(
         clrRegion,
         parseFloat(qtePalettes) || 1,
         prestataire,
-        statsPrestataire
+        statsPrestataire,
       );
 
       res.json({ ...estimation, statsPrestataire });
     } catch (err) {
       res.status(500).json({ message: "Erreur estimation" });
     }
-  }
+  },
 );
 
 module.exports = router;

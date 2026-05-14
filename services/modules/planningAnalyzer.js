@@ -1,31 +1,64 @@
-// services/modules/planningAnalyzer.js
-//
-// Module intelligent Planification — LECTURE SEULE
-// Ne modifie jamais de données, produit uniquement des analyses et suggestions
+// services/modules/planningAnalyzer.js — Sprint 8 refonte
+// Branché sur StockCLR (Sprint 7) au lieu de l'ancien Stock
 
-const { Stock, CLR, Plateforme, LignePlanif, PlanifSession, Order, OrderItem } = require("../../models");
+const {
+  StockCLR,
+  Produit,
+  CLR,
+  Plateforme,
+  LignePlanif,
+  PlanifSession,
+  Order,
+  OrderItem,
+} = require("../../models");
 const { Op } = require("sequelize");
-const sequelize = require("../../config/database");
 
 // ─────────────────────────────────────────────────────────────
-// Dashboard couleur par CLR
-// Retourne pour chaque CLR : stock actuel, commandes en cours,
-// écart, niveau (VERT / ORANGE / ROUGE)
+// HELPER : stock total disponible pour un CLR donné
+// Somme qteDisponible sur tous les produits du CLR
 // ─────────────────────────────────────────────────────────────
+async function _getStockTotalCLR(clrId, companyId) {
+  const stocks = await StockCLR.findAll({
+    where: { clrId, companyId },
+  });
+  return stocks.reduce((sum, s) => sum + (s.qteDisponible || 0), 0);
+}
+
+// ─────────────────────────────────────────────────────────────
+// HELPER : stock détaillé par produit pour un CLR
+// ─────────────────────────────────────────────────────────────
+async function _getStockDetailCLR(clrId, companyId) {
+  return StockCLR.findAll({
+    where: { clrId, companyId },
+    include: [
+      {
+        model: Produit,
+        as: "produit",
+        where: { actif: true },
+        attributes: ["id", "sku", "nom", "famille"],
+        required: true,
+      },
+    ],
+  });
+}
+
 async function getDashboardCLR(companyId) {
-  // 1. Tous les CLR actifs
   const clrs = await CLR.findAll({
     where: { actif: true },
-    include: [{ model: Plateforme, as: "plateforme", attributes: ["id", "nom", "region"] }],
-    order: [["region", "ASC"], ["code", "ASC"]],
+    include: [
+      {
+        model: Plateforme,
+        as: "plateforme",
+        attributes: ["id", "nom", "region"],
+      },
+    ],
+    order: [
+      ["region", "ASC"],
+      ["code", "ASC"],
+    ],
   });
 
-  // 2. Stocks par CLR (depotId = clrId dans notre modèle)
-  const stocks = await Stock.findAll({
-    where: { companyId },
-  });
-
-  // 3. Commandes planifiées non encore livrées (besoin en cours)
+  // Commandes planifiées non livrées
   const lignesActives = await LignePlanif.findAll({
     where: { statut: { [Op.in]: ["PLANIFIEE", "ENVOYEE_TRANSPORT"] } },
     include: [
@@ -34,6 +67,7 @@ async function getDashboardCLR(companyId) {
         as: "session",
         where: { companyId },
         attributes: [],
+        required: true,
       },
       {
         model: Order,
@@ -43,77 +77,71 @@ async function getDashboardCLR(companyId) {
     ],
   });
 
-  // 4. Agréger stock par CLR
-  const stockParClr = {};
-  stocks.forEach((s) => {
-    const key = s.depotId;
-    if (!stockParClr[key]) stockParClr[key] = 0;
-    stockParClr[key] += s.availableQty || 0;
-  });
-
-  // 5. Agréger commandes planifiées par CLR
+  // Agréger commandes par CLR
   const commandesParClr = {};
   lignesActives.forEach((ligne) => {
     const key = ligne.clrId;
     if (!commandesParClr[key]) commandesParClr[key] = 0;
-    const items = ligne.order?.OrderItems || [];
-    items.forEach((item) => {
+    (ligne.order?.OrderItems || []).forEach((item) => {
       commandesParClr[key] += item.quantity || 0;
     });
   });
 
-  // 6. Construire le dashboard
-  const dashboard = clrs.map((clr) => {
-    const stockActuel   = stockParClr[clr.id]    || 0;
-    const commandesDues = commandesParClr[clr.id] || 0;
-    const ecart         = stockActuel - commandesDues;
-    const ratio         = commandesDues === 0 ? 1 : stockActuel / commandesDues;
+  // Construire dashboard — stock réel depuis StockCLR
+  const dashboard = await Promise.all(
+    clrs.map(async (clr) => {
+      const stockActuel = await _getStockTotalCLR(clr.id, companyId);
+      const commandesDues = commandesParClr[clr.id] || 0;
+      const ecart = stockActuel - commandesDues;
+      const ratio = commandesDues === 0 ? 1 : stockActuel / commandesDues;
 
-    let niveau, couleur, message;
-    if (commandesDues === 0 && stockActuel === 0) {
-      niveau  = "NEUTRE";
-      couleur = "grey";
-      message = "Aucune activité";
-    } else if (ecart < 0) {
-      niveau  = "ROUGE";
-      couleur = "red";
-      message = `Rupture : manque ${Math.abs(ecart).toFixed(0)} unités`;
-    } else if (ratio < 1.2) {
-      niveau  = "ORANGE";
-      couleur = "orange";
-      message = `Stock faible : ${ecart.toFixed(0)} unités de marge`;
-    } else {
-      niveau  = "VERT";
-      couleur = "green";
-      message = `Stock suffisant : ${ecart.toFixed(0)} unités disponibles`;
-    }
+      let niveau, couleur, message;
+      if (commandesDues === 0 && stockActuel === 0) {
+        niveau = "NEUTRE";
+        couleur = "grey";
+        message = "Aucune activité";
+      } else if (ecart < 0) {
+        niveau = "ROUGE";
+        couleur = "red";
+        message = `Rupture : manque ${Math.abs(ecart).toFixed(0)} unités`;
+      } else if (ratio < 1.2) {
+        niveau = "ORANGE";
+        couleur = "orange";
+        message = `Stock faible : ${ecart.toFixed(0)} unités de marge`;
+      } else {
+        niveau = "VERT";
+        couleur = "green";
+        message = `Stock suffisant : ${ecart.toFixed(0)} unités disponibles`;
+      }
 
-    return {
-      clr: {
-        id:       clr.id,
-        code:     clr.code,
-        nom:      clr.nom,
-        wilaya:   clr.wilaya,
-        region:   clr.region,
-        plateforme: clr.plateforme,
-      },
-      stockActuel,
-      commandesDues,
-      ecart,
-      ratio: Math.round(ratio * 100) / 100,
-      niveau,
-      couleur,
-      message,
-    };
-  });
+      return {
+        clr: {
+          id: clr.id,
+          code: clr.code,
+          nom: clr.nom,
+          wilaya: clr.wilaya,
+          region: clr.region,
+          plateforme: clr.plateforme,
+        },
+        stockActuel,
+        commandesDues,
+        ecart,
+        ratio: Math.round(ratio * 100) / 100,
+        niveau,
+        couleur,
+        message,
+      };
+    }),
+  );
 
-  // 7. Résumé global
   const resume = {
-    totalVert:   dashboard.filter((d) => d.niveau === "VERT").length,
+    totalVert: dashboard.filter((d) => d.niveau === "VERT").length,
     totalOrange: dashboard.filter((d) => d.niveau === "ORANGE").length,
-    totalRouge:  dashboard.filter((d) => d.niveau === "ROUGE").length,
+    totalRouge: dashboard.filter((d) => d.niveau === "ROUGE").length,
     totalNeutre: dashboard.filter((d) => d.niveau === "NEUTRE").length,
-    clrsEnRupture: dashboard.filter((d) => d.niveau === "ROUGE").map((d) => d.clr.code),
+    clrsEnRupture: dashboard
+      .filter((d) => d.niveau === "ROUGE")
+      .map((d) => d.clr.code),
   };
 
   return { dashboard, resume };
@@ -121,76 +149,161 @@ async function getDashboardCLR(companyId) {
 
 // ─────────────────────────────────────────────────────────────
 // Suggestion diapason D1 vs D2
-// Pour un CLR donné, calcule quelle option est préférable
 // ─────────────────────────────────────────────────────────────
-async function getSuggestionDiapason(clrId, companyId) {
+// Remplacer toute la fonction getSuggestionDiapason par :
+async function getSuggestionDiapason(clrId, companyId, orderId = null) {
   const clr = await CLR.findByPk(clrId, {
     include: [{ model: Plateforme, as: "plateforme" }],
   });
   if (!clr) throw new Error("CLR introuvable");
 
-  // Stock actuel au CLR
-  const stockCLR = await Stock.findAll({ where: { depotId: clrId, companyId } });
-  const stockActuelCLR = stockCLR.reduce((s, r) => s + r.availableQty, 0);
+  // Stock détaillé par produit au CLR
+  const stocksDetail = await _getStockDetailCLR(clrId, companyId);
+  const stockActuelCLR = stocksDetail.reduce(
+    (sum, s) => sum + (s.qteDisponible || 0),
+    0,
+  );
+
+  // ── NOUVEAU : croisement avec les produits de la commande ──
+  let stockParProduit = [];
+  if (orderId) {
+    const order = await Order.findOne({
+      where: { id: orderId, companyId },
+      include: [
+        {
+          model: OrderItem,
+          as: "OrderItems",
+          include: [
+            {
+              model: Produit,
+              as: "produit",
+              attributes: ["id", "sku", "nom", "famille"],
+              required: false,
+            },
+          ],
+        },
+      ],
+    });
+
+    if (order) {
+      stockParProduit = (order.OrderItems || []).map((item) => {
+        // Chercher le stock de ce produit au CLR
+        const stockProduit = stocksDetail.find(
+          (s) => s.produitId === item.produitId,
+        );
+        const dispo = stockProduit?.qteDisponible || 0;
+        const demande = item.quantity || 0;
+        const couverture =
+          demande === 0 ? 100 : Math.round((dispo / demande) * 100);
+
+        let feu;
+        if (couverture >= 100) feu = "VERT";
+        else if (couverture >= 50) feu = "ORANGE";
+        else feu = "ROUGE";
+
+        return {
+          produitId: item.produitId,
+          sku: item.produit?.sku || item.sku || "—",
+          nom: item.produit?.nom || item.productName || "—",
+          famille: item.produit?.famille || "—",
+          demande,
+          dispo,
+          couverture,
+          feu,
+          manque: Math.max(0, demande - dispo),
+        };
+      });
+    }
+  }
 
   // Stock à la plateforme de rattachement
   let stockPlateforme = 0;
   let capacitePlateforme = 0;
-  if (clr.plateforme) {
-    const stockPlat = await Stock.findAll({
-      where: { depotId: clr.plateformeId, companyId },
-    });
-    stockPlateforme    = stockPlat.reduce((s, r) => s + r.availableQty, 0);
-    capacitePlateforme = clr.plateforme.capacite || 0;
+  if (clr.plateformeId) {
+    stockPlateforme = await _getStockTotalCLR(clr.plateformeId, companyId);
+    capacitePlateforme = clr.plateforme?.capacite || 0;
   }
 
-  // Commandes actives vers ce CLR
   const lignesActives = await LignePlanif.findAll({
     where: { clrId, statut: { [Op.in]: ["PLANIFIEE", "ENVOYEE_TRANSPORT"] } },
-    include: [{ model: PlanifSession, as: "session", where: { companyId }, attributes: [] }],
+    include: [
+      {
+        model: PlanifSession,
+        as: "session",
+        where: { companyId },
+        attributes: [],
+        required: true,
+      },
+    ],
   });
   const nbLignesActives = lignesActives.length;
 
-  // Logique de suggestion
+  // Logique suggestion — inchangée
   let suggestion, raison, score;
-
   if (stockPlateforme > stockActuelCLR * 2 && capacitePlateforme > 0) {
     suggestion = "D1";
-    raison     = `La plateforme ${clr.plateforme?.nom} dispose de stock suffisant pour transiter`;
-    score      = 85;
+    raison = `La plateforme ${clr.plateforme?.nom} dispose de stock suffisant pour transiter`;
+    score = 85;
   } else if (nbLignesActives > 3) {
     suggestion = "D2";
-    raison     = "Volume de livraisons élevé — livraison directe au CLR plus efficace";
-    score      = 78;
+    raison =
+      "Volume de livraisons élevé — livraison directe au CLR plus efficace";
+    score = 78;
   } else if (stockActuelCLR < 50) {
     suggestion = "D2";
-    raison     = "Stock CLR critique — approvisionnement direct recommandé (D2 plus rapide)";
-    score      = 90;
+    raison =
+      "Stock CLR critique — approvisionnement direct recommandé (D2 plus rapide)";
+    score = 90;
   } else {
     suggestion = "D1";
-    raison     = "Flux standard — passage par la plateforme régionale recommandé";
-    score      = 65;
+    raison = "Flux standard — passage par la plateforme régionale recommandé";
+    score = 65;
   }
+
+  // Résumé couverture si orderId fourni
+  const resumeCouverture = orderId
+    ? {
+        totalLignes: stockParProduit.length,
+        couverts: stockParProduit.filter((p) => p.feu === "VERT").length,
+        partiels: stockParProduit.filter((p) => p.feu === "ORANGE").length,
+        impossibles: stockParProduit.filter((p) => p.feu === "ROUGE").length,
+      }
+    : null;
 
   return {
     clr: { id: clr.id, code: clr.code, nom: clr.nom, region: clr.region },
-    plateforme: clr.plateforme ? { id: clr.plateforme.id, nom: clr.plateforme.nom } : null,
+    plateforme: clr.plateforme
+      ? { id: clr.plateforme.id, nom: clr.plateforme.nom }
+      : null,
     stockActuelCLR,
     stockPlateforme,
     nbLignesActives,
     suggestion,
     raison,
     score,
+    // ── NOUVEAU ──
+    stockParProduit, // [] si pas d'orderId
+    resumeCouverture, // null si pas d'orderId
     alternatives: {
-      D1: { disponible: !!clr.plateforme, description: `Via ${clr.plateforme?.nom || "N/A"} → ${clr.nom}` },
-      D2: { disponible: true,             description: `Direct → ${clr.nom}` },
+      D1: {
+        disponible: !!clr.plateforme,
+        description: `Via ${clr.plateforme?.nom || "N/A"} → ${clr.nom}`,
+      },
+      D2: { disponible: true, description: `Direct → ${clr.nom}` },
+      D3: { disponible: true, description: `Transfert CLR → ${clr.nom}` },
+      D4: {
+        disponible: !!clr.plateforme,
+        description: `Réappro Usine → ${clr.plateforme?.nom || "N/A"}`,
+      },
+      D5: {
+        disponible: !!clr.plateforme,
+        description: `Retour ${clr.nom} → Plateforme`,
+      },
     },
   };
 }
-
 // ─────────────────────────────────────────────────────────────
-// Alertes rupture anticipée J+3
-// CLR dont le stock sera insuffisant dans 3 jours
+// Alertes rupture anticipée
 // ─────────────────────────────────────────────────────────────
 async function getAlertesRupture(companyId) {
   const { dashboard } = await getDashboardCLR(companyId);
@@ -198,18 +311,19 @@ async function getAlertesRupture(companyId) {
   const alertes = dashboard
     .filter((d) => d.niveau === "ROUGE" || d.niveau === "ORANGE")
     .map((d) => ({
-      clr:          d.clr,
-      niveau:       d.niveau,
-      stockActuel:  d.stockActuel,
+      clr: d.clr,
+      niveau: d.niveau,
+      stockActuel: d.stockActuel,
       commandesDues: d.commandesDues,
-      ecart:        d.ecart,
-      message:      d.message,
-      urgence:      d.niveau === "ROUGE" ? "CRITIQUE" : "ATTENTION",
-      action:       d.niveau === "ROUGE"
-        ? "Planifier un réapprovisionnement immédiat"
-        : "Surveiller et prévoir un réapprovisionnement",
+      ecart: d.ecart,
+      message: d.message,
+      urgence: d.niveau === "ROUGE" ? "CRITIQUE" : "ATTENTION",
+      action:
+        d.niveau === "ROUGE"
+          ? "Planifier un réapprovisionnement immédiat"
+          : "Surveiller et prévoir un réapprovisionnement",
     }))
-    .sort((a, b) => a.ecart - b.ecart); // Les plus critiques en premier
+    .sort((a, b) => a.ecart - b.ecart);
 
   return {
     nbAlertes: alertes.length,
@@ -220,7 +334,6 @@ async function getAlertesRupture(companyId) {
 
 // ─────────────────────────────────────────────────────────────
 // Simulation de flux
-// "Si j'envoie X palettes par D1 vers CLR Y, quel impact ?"
 // ─────────────────────────────────────────────────────────────
 async function simulerFlux(clrId, quantite, diapason, companyId) {
   const clr = await CLR.findByPk(clrId, {
@@ -228,48 +341,46 @@ async function simulerFlux(clrId, quantite, diapason, companyId) {
   });
   if (!clr) throw new Error("CLR introuvable");
 
-  const stockCLR = await Stock.findAll({ where: { depotId: clrId, companyId } });
-  const stockActuelCLR = stockCLR.reduce((s, r) => s + r.availableQty, 0);
-
+  const stockActuelCLR = await _getStockTotalCLR(clrId, companyId);
   let stockPlat = 0;
-  if (clr.plateforme) {
-    const sp = await Stock.findAll({ where: { depotId: clr.plateformeId, companyId } });
-    stockPlat = sp.reduce((s, r) => s + r.availableQty, 0);
+  if (clr.plateformeId) {
+    stockPlat = await _getStockTotalCLR(clr.plateformeId, companyId);
   }
 
   const simulation = {
-    avant: {
-      stockCLR:         stockActuelCLR,
-      stockPlateforme:  stockPlat,
-    },
+    avant: { stockCLR: stockActuelCLR, stockPlateforme: stockPlat },
     apres: {
-      stockCLR:        stockActuelCLR + quantite,
-      stockPlateforme: diapason === "D1" ? Math.max(0, stockPlat - quantite) : stockPlat,
+      stockCLR: stockActuelCLR + quantite,
+      stockPlateforme:
+        diapason === "D1" ? Math.max(0, stockPlat - quantite) : stockPlat,
     },
     impact: {
-      gainCLR:           quantite,
-      pertePlateforme:   diapason === "D1" ? quantite : 0,
-      diapasonUtilise:   diapason,
-      clr:               { code: clr.code, nom: clr.nom },
-      plateforme:        clr.plateforme?.nom || "N/A",
+      gainCLR: quantite,
+      pertePlateforme: diapason === "D1" ? quantite : 0,
+      diapasonUtilise: diapason,
+      clr: { code: clr.code, nom: clr.nom },
+      plateforme: clr.plateforme?.nom || "N/A",
     },
-    faisable: diapason === "D2" || (stockPlat >= quantite),
-    alertes:  [],
+    faisable: diapason === "D2" || stockPlat >= quantite,
+    alertes: [],
   };
 
   if (diapason === "D1" && stockPlat < quantite) {
-    simulation.alertes.push(`Stock insuffisant à la plateforme ${clr.plateforme?.nom} (disponible: ${stockPlat}, requis: ${quantite})`);
+    simulation.alertes.push(
+      `Stock insuffisant à la plateforme ${clr.plateforme?.nom} (disponible: ${stockPlat}, requis: ${quantite})`,
+    );
   }
   if (simulation.apres.stockCLR > 1000) {
-    simulation.alertes.push(`Attention : stock CLR post-livraison élevé (${simulation.apres.stockCLR} unités)`);
+    simulation.alertes.push(
+      `Attention : stock CLR post-livraison élevé (${simulation.apres.stockCLR} unités)`,
+    );
   }
 
   return simulation;
 }
 
 // ─────────────────────────────────────────────────────────────
-// Optimisation chargement
-// Maximiser le remplissage camion selon commandes groupées par CLR
+// Optimisation chargement — avec détail produits
 // ─────────────────────────────────────────────────────────────
 async function getOptimisationChargement(sessionId, companyId) {
   const session = await PlanifSession.findOne({
@@ -282,9 +393,33 @@ async function getOptimisationChargement(sessionId, companyId) {
           {
             model: Order,
             as: "order",
-            include: [{ model: OrderItem, as: "OrderItems" }],
+            include: [
+              {
+                model: OrderItem,
+                as: "OrderItems",
+                attributes: [
+                  "productName",
+                  "quantity",
+                  "unit",
+                  "produitId",
+                  "sku",
+                ],
+                include: [
+                  {
+                    model: Produit,
+                    as: "produit",
+                    attributes: ["id", "sku", "nom", "famille"],
+                    required: false,
+                  },
+                ],
+              },
+            ],
           },
-          { model: CLR, as: "clr", attributes: ["id", "code", "nom", "region"] },
+          {
+            model: CLR,
+            as: "clr",
+            attributes: ["id", "code", "nom", "region"],
+          },
         ],
       },
     ],
@@ -292,36 +427,74 @@ async function getOptimisationChargement(sessionId, companyId) {
 
   if (!session) throw new Error("Session introuvable");
 
-  // Grouper par CLR
+  const CAPACITE_CAMION = 200;
   const groupesParClr = {};
+
   (session.lignes || []).forEach((ligne) => {
     const key = ligne.clrId;
     if (!groupesParClr[key]) {
-      groupesParClr[key] = { clr: ligne.clr, lignes: [], quantiteTotale: 0 };
+      groupesParClr[key] = {
+        clr: ligne.clr,
+        lignes: [],
+        quantiteTotale: 0,
+        produitsDetail: {},
+      };
     }
+
     const items = ligne.order?.OrderItems || [];
     const qte = items.reduce((s, i) => s + (i.quantity || 0), 0);
-    groupesParClr[key].lignes.push({ ligneId: ligne.id, orderId: ligne.orderId, quantite: qte });
+
+    // Détail par produit
+    // Dans getOptimisationChargement, remplacer uniquement le bloc "Détail par produit" :
+
+    items.forEach((item) => {
+      // ← utiliser sku réel si disponible, sinon fallback productName
+      const k = item.produit?.sku || item.productName;
+      const label = item.produit?.nom || item.productName;
+      if (!groupesParClr[key].produitsDetail[k]) {
+        groupesParClr[key].produitsDetail[k] = {
+          label,
+          sku: item.produit?.sku || null,
+          quantite: 0,
+          unit: item.unit,
+        };
+      }
+      groupesParClr[key].produitsDetail[k].quantite += item.quantity || 0;
+    });
+    groupesParClr[key].lignes.push({
+      ligneId: ligne.id,
+      orderId: ligne.orderId,
+      quantite: qte,
+    });
     groupesParClr[key].quantiteTotale += qte;
   });
 
-  // Suggestion de regroupement par camion (capacité standard : 200 unités)
-  const CAPACITE_CAMION = 200;
-  const groupes = Object.values(groupesParClr);
-  const suggestions = groupes.map((g) => ({
-    clr:              g.clr,
-    nbLignes:         g.lignes.length,
-    quantiteTotale:   g.quantiteTotale,
-    nbCamionsNeeded:  Math.ceil(g.quantiteTotale / CAPACITE_CAMION),
-    tauxRemplissage:  Math.min(100, Math.round((g.quantiteTotale % CAPACITE_CAMION) / CAPACITE_CAMION * 100)) || 100,
-    recommandation:   g.quantiteTotale <= CAPACITE_CAMION
-      ? "Un seul camion suffit"
-      : `Prévoir ${Math.ceil(g.quantiteTotale / CAPACITE_CAMION)} camions`,
+  const suggestions = Object.values(groupesParClr).map((g) => ({
+    clr: g.clr,
+    nbLignes: g.lignes.length,
+    quantiteTotale: g.quantiteTotale,
+    produitsDetail: Object.entries(g.produitsDetail).map(([nom, d]) => ({
+      nom,
+      quantite: d.quantite,
+      unit: d.unit,
+    })),
+    nbCamionsNeeded: Math.ceil(g.quantiteTotale / CAPACITE_CAMION),
+    tauxRemplissage:
+      Math.min(
+        100,
+        Math.round(
+          ((g.quantiteTotale % CAPACITE_CAMION) / CAPACITE_CAMION) * 100,
+        ),
+      ) || 100,
+    recommandation:
+      g.quantiteTotale <= CAPACITE_CAMION
+        ? "Un seul camion suffit"
+        : `Prévoir ${Math.ceil(g.quantiteTotale / CAPACITE_CAMION)} camions`,
   }));
 
   return {
     sessionId,
-    nbGroupes:    groupes.length,
+    nbGroupes: groupesParClr ? Object.keys(groupesParClr).length : 0,
     suggestions,
     capaciteCamion: CAPACITE_CAMION,
   };

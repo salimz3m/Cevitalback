@@ -33,17 +33,17 @@ const { Op } = require("sequelize");
 const CONFIG = {
   // Délais standard par région (heures)
   DELAIS_REGION: {
-    EST:    { min: 4,  max: 8,  label: "4–8h" },
-    CENTRE: { min: 2,  max: 5,  label: "2–5h" },
-    OUEST:  { min: 6,  max: 12, label: "6–12h" },
-    DEFAULT:{ min: 5,  max: 10, label: "5–10h" },
+    EST: { min: 4, max: 8, label: "4–8h" },
+    CENTRE: { min: 2, max: 5, label: "2–5h" },
+    OUEST: { min: 6, max: 12, label: "6–12h" },
+    DEFAULT: { min: 5, max: 10, label: "5–10h" },
   },
   // Coûts indicatifs par région (DA / palette)
   COUT_PALETTE: {
-    EST:    3500,
+    EST: 3500,
     CENTRE: 2800,
-    OUEST:  4200,
-    DEFAULT:3500,
+    OUEST: 4200,
+    DEFAULT: 3500,
   },
   // Seuil retard (heures au-delà de dateArriveePrevue)
   SEUIL_RETARD_H: 2,
@@ -65,13 +65,15 @@ async function regroupementOptimal(companyId) {
   const sessions = await PlanifSession.findAll({
     where: {
       companyId,
-      statut: ["VALIDEE", "ENVOYEE"],
+      statut: { [Op.in]: ["VALIDEE", "ENVOYEE", "BROUILLON"] },
     },
     include: [
       {
         model: LignePlanif,
         as: "lignes",
-        where: { statut: ["PLANIFIEE", "ENVOYEE_TRANSPORT"] },
+        where: {
+          statut: { [Op.in]: ["PLANIFIEE", "ENVOYEE_TRANSPORT", "LIVREE"] },
+        },
         required: true,
         include: [
           {
@@ -79,7 +81,11 @@ async function regroupementOptimal(companyId) {
             as: "order",
             include: [{ model: OrderItem, as: "OrderItems" }],
           },
-          { model: CLR, as: "clr", attributes: ["id", "code", "nom", "wilaya", "region"] },
+          {
+            model: CLR,
+            as: "clr",
+            attributes: ["id", "code", "nom", "wilaya", "region"],
+          },
         ],
       },
     ],
@@ -100,7 +106,8 @@ async function regroupementOptimal(companyId) {
         orderNumber: ligne.order?.orderNumber,
         items: ligne.order?.OrderItems || [],
         qteTotale: (ligne.order?.OrderItems || []).reduce(
-          (sum, i) => sum + (i.quantity || 0), 0
+          (sum, i) => sum + (i.quantity || 0),
+          0,
         ),
       });
     }
@@ -131,9 +138,15 @@ async function regroupementOptimal(companyId) {
   // Construire les suggestions de regroupement
   const suggestions = Object.values(groupesParCLR).map((groupe) => {
     const region = groupe.clr?.region || "DEFAULT";
-    const delaiConfig = CONFIG.DELAIS_REGION[region] || CONFIG.DELAIS_REGION.DEFAULT;
-    const coutEstime = (groupe.qteTotale || 1) * (CONFIG.COUT_PALETTE[region] || CONFIG.COUT_PALETTE.DEFAULT);
-    const tauxRemplissage = Math.min(100, Math.round((groupe.qteTotale / 33) * 100)); // 33 pal = camion standard
+    const delaiConfig =
+      CONFIG.DELAIS_REGION[region] || CONFIG.DELAIS_REGION.DEFAULT;
+    const coutEstime =
+      (groupe.qteTotale || 1) *
+      (CONFIG.COUT_PALETTE[region] || CONFIG.COUT_PALETTE.DEFAULT);
+    const tauxRemplissage = Math.min(
+      100,
+      Math.round((groupe.qteTotale / 33) * 100),
+    ); // 33 pal = camion standard
     const priorite = _calculerPriorite(groupe);
 
     return {
@@ -180,7 +193,9 @@ function _texteRecommandation(groupe, tauxRemplissage, priorite) {
   if (tauxRemplissage >= CONFIG.TAUX_REMPLISSAGE_OPTIMAL)
     parts.push(`✓ Chargement optimal (${tauxRemplissage}%)`);
   else if (tauxRemplissage < 50)
-    parts.push(`⚠ Chargement partiel (${tauxRemplissage}%) — envisager mutualisation`);
+    parts.push(
+      `⚠ Chargement partiel (${tauxRemplissage}%) — envisager mutualisation`,
+    );
   if (groupe.sessions.size > 1)
     parts.push(`${groupe.sessions.size} sessions combinées`);
   return parts.join(" · ") || "Prêt pour expédition";
@@ -230,7 +245,8 @@ async function scorerPrestataires(companyId) {
         const diffH = (reelle - prevue) / 3600000;
         if (diffH > CONFIG.SEUIL_RETARD_H) stats[nom].retards++;
         stats[nom].delaisMoyens.push(
-          (new Date(ordre.dateLivraisonReelle) - new Date(ordre.dateDepart)) / 3600000
+          (new Date(ordre.dateLivraisonReelle) - new Date(ordre.dateDepart)) /
+            3600000,
         );
       }
     }
@@ -239,20 +255,19 @@ async function scorerPrestataires(companyId) {
 
   // Calculer les scores (sur 100)
   const scores = Object.values(stats).map((s) => {
-    const tauxLivraison    = s.total > 0 ? (s.livres / s.total) * 100 : 50;
-    const tauxPonctualite  = s.livres > 0 ? ((s.livres - s.retards) / s.livres) * 100 : 50;
+    const tauxLivraison = s.total > 0 ? (s.livres / s.total) * 100 : 50;
+    const tauxPonctualite =
+      s.livres > 0 ? ((s.livres - s.retards) / s.livres) * 100 : 50;
     const penaliteIncident = Math.min(30, s.incidents * 10);
-    const delaiMoyen       = s.delaisMoyens.length > 0
-      ? s.delaisMoyens.reduce((a, b) => a + b, 0) / s.delaisMoyens.length
-      : null;
+    const delaiMoyen =
+      s.delaisMoyens.length > 0
+        ? s.delaisMoyens.reduce((a, b) => a + b, 0) / s.delaisMoyens.length
+        : null;
 
     // Score pondéré : 50% livraison + 30% ponctualité + 20% bonus expérience
     const bonusExp = Math.min(20, s.total * 2);
     const score = Math.round(
-      tauxLivraison * 0.5 +
-      tauxPonctualite * 0.3 +
-      bonusExp -
-      penaliteIncident
+      tauxLivraison * 0.5 + tauxPonctualite * 0.3 + bonusExp - penaliteIncident,
     );
 
     return {
@@ -264,7 +279,14 @@ async function scorerPrestataires(companyId) {
       nbIncidents: s.incidents,
       delaiMoyenH: delaiMoyen ? Math.round(delaiMoyen * 10) / 10 : null,
       recommande: score >= CONFIG.SCORE_MIN_RECOMMANDE,
-      niveau: score >= 80 ? "EXCELLENT" : score >= 60 ? "BON" : score >= 40 ? "MOYEN" : "RISQUE",
+      niveau:
+        score >= 80
+          ? "EXCELLENT"
+          : score >= 60
+            ? "BON"
+            : score >= 40
+              ? "MOYEN"
+              : "RISQUE",
     };
   });
 
@@ -282,15 +304,23 @@ async function scorerPrestataires(companyId) {
 // MODULE 3 : ESTIMATION COÛT / DÉLAI
 // Modèle heuristique basé sur région, quantité, historique
 // ─────────────────────────────────────────────────────────────
-function estimerCoutDelai(clrRegion, qtePalettes, prestataire = null, statsPrestataire = null) {
+function estimerCoutDelai(
+  clrRegion,
+  qtePalettes,
+  prestataire = null,
+  statsPrestataire = null,
+) {
   const region = clrRegion || "DEFAULT";
-  const delaiConfig = CONFIG.DELAIS_REGION[region] || CONFIG.DELAIS_REGION.DEFAULT;
-  const coutBase = (qtePalettes || 1) * (CONFIG.COUT_PALETTE[region] || CONFIG.COUT_PALETTE.DEFAULT);
+  const delaiConfig =
+    CONFIG.DELAIS_REGION[region] || CONFIG.DELAIS_REGION.DEFAULT;
+  const coutBase =
+    (qtePalettes || 1) *
+    (CONFIG.COUT_PALETTE[region] || CONFIG.COUT_PALETTE.DEFAULT);
 
   // Ajustement si on a l'historique du prestataire
   let facteurDelai = 1.0;
-  let facteurCout  = 1.0;
-  let note         = null;
+  let facteurCout = 1.0;
+  let note = null;
 
   if (statsPrestataire) {
     if (statsPrestataire.tauxPonctualite < 70) {
@@ -307,7 +337,7 @@ function estimerCoutDelai(clrRegion, qtePalettes, prestataire = null, statsPrest
   const surchargeWeekend = [5, 6].includes(jourSemaine);
   if (surchargeWeekend) {
     facteurDelai *= 1.15;
-    facteurCout  *= 1.1;
+    facteurCout *= 1.1;
   }
 
   return {
@@ -332,9 +362,16 @@ async function detecterAlertes(companyId) {
   const ordresActifs = await OrdreTransport.findAll({
     where: {
       companyId,
-      statut: ["CREE", "EN_ROUTE"],
+      statut: { [Op.in]: ["CREE", "EN_ROUTE", "LIVRE"] },
     },
-    include: [{ model: SuiviTransport, as: "suivis", limit: 1, order: [["createdAt", "DESC"]] }],
+    include: [
+      {
+        model: SuiviTransport,
+        as: "suivis",
+        limit: 1,
+        order: [["createdAt", "DESC"]],
+      },
+    ],
   });
 
   const alertes = [];
@@ -398,7 +435,7 @@ async function detecterAlertes(companyId) {
   return {
     alertes,
     nbCritiques: alertes.filter((a) => a.niveau === "CRITIQUE").length,
-    nbWarnings:  alertes.filter((a) => a.niveau === "WARNING").length,
+    nbWarnings: alertes.filter((a) => a.niveau === "WARNING").length,
     total: alertes.length,
   };
 }
@@ -417,38 +454,50 @@ async function analyserPerformance(companyId) {
     },
   });
 
-  const total    = ordres.length;
-  const livres   = ordres.filter((o) => o.statut === "LIVRE").length;
-  const incidents= ordres.filter((o) => o.statut === "INCIDENT").length;
-  const enCours  = ordres.filter((o) => ["CREE", "EN_ROUTE"].includes(o.statut)).length;
+  const total = ordres.length;
+  const livres = ordres.filter((o) => o.statut === "LIVRE").length;
+  const incidents = ordres.filter((o) => o.statut === "INCIDENT").length;
+  const enCours = ordres.filter((o) =>
+    ["CREE", "EN_ROUTE"].includes(o.statut),
+  ).length;
 
   const ordresLivresAvecDates = ordres.filter(
-    (o) => o.statut === "LIVRE" && o.dateDepart && o.dateLivraisonReelle
+    (o) => o.statut === "LIVRE" && o.dateDepart && o.dateLivraisonReelle,
   );
-  const delaiMoyen = ordresLivresAvecDates.length > 0
-    ? ordresLivresAvecDates.reduce((sum, o) => {
-        return sum + (new Date(o.dateLivraisonReelle) - new Date(o.dateDepart)) / 3600000;
-      }, 0) / ordresLivresAvecDates.length
-    : null;
+  const delaiMoyen =
+    ordresLivresAvecDates.length > 0
+      ? ordresLivresAvecDates.reduce((sum, o) => {
+          return (
+            sum +
+            (new Date(o.dateLivraisonReelle) - new Date(o.dateDepart)) / 3600000
+          );
+        }, 0) / ordresLivresAvecDates.length
+      : null;
 
   const ordresEnRetard = ordres.filter((o) => {
-    if (o.statut !== "LIVRE" || !o.dateArriveePrevue || !o.dateLivraisonReelle) return false;
-    return (new Date(o.dateLivraisonReelle) - new Date(o.dateArriveePrevue)) / 3600000 > CONFIG.SEUIL_RETARD_H;
+    if (o.statut !== "LIVRE" || !o.dateArriveePrevue || !o.dateLivraisonReelle)
+      return false;
+    return (
+      (new Date(o.dateLivraisonReelle) - new Date(o.dateArriveePrevue)) /
+        3600000 >
+      CONFIG.SEUIL_RETARD_H
+    );
   }).length;
 
-  const tauxService      = total > 0 ? Math.round((livres / total) * 100) : null;
-  const tauxPonctualite  = livres > 0 ? Math.round(((livres - ordresEnRetard) / livres) * 100) : null;
+  const tauxService = total > 0 ? Math.round((livres / total) * 100) : null;
+  const tauxPonctualite =
+    livres > 0 ? Math.round(((livres - ordresEnRetard) / livres) * 100) : null;
 
   return {
     periode: `${CONFIG.FENETRE_PERF_JOURS} derniers jours`,
     kpi: {
-      totalOrdres:    total,
-      ordresLivres:   livres,
-      ordresEnCours:  enCours,
-      ordresIncidents:incidents,
-      tauxService:    tauxService !== null ? `${tauxService}%` : "N/A",
-      tauxPonctualite:tauxPonctualite !== null ? `${tauxPonctualite}%` : "N/A",
-      delaiMoyenH:    delaiMoyen ? Math.round(delaiMoyen * 10) / 10 : null,
+      totalOrdres: total,
+      ordresLivres: livres,
+      ordresEnCours: enCours,
+      ordresIncidents: incidents,
+      tauxService: tauxService !== null ? `${tauxService}%` : "N/A",
+      tauxPonctualite: tauxPonctualite !== null ? `${tauxPonctualite}%` : "N/A",
+      delaiMoyenH: delaiMoyen ? Math.round(delaiMoyen * 10) / 10 : null,
       ordresEnRetard,
     },
     tendance: _calculerTendance(tauxService),
@@ -457,9 +506,9 @@ async function analyserPerformance(companyId) {
 
 function _calculerTendance(tauxService) {
   if (tauxService === null) return "INSUFFISANT";
-  if (tauxService >= 95)   return "EXCELLENT";
-  if (tauxService >= 85)   return "BON";
-  if (tauxService >= 70)   return "MOYEN";
+  if (tauxService >= 95) return "EXCELLENT";
+  if (tauxService >= 85) return "BON";
+  if (tauxService >= 70) return "MOYEN";
   return "A_AMELIORER";
 }
 
@@ -485,9 +534,9 @@ async function getSuggestions(companyId) {
     // Résumé exécutif
     resume: {
       actionRequise: alertes.nbCritiques > 0 || regroupement.totalLignes > 0,
-      nbAlertsCritiques:   alertes.nbCritiques,
-      nbLignesAExpedier:   regroupement.totalLignes,
-      nbGroupesSuggeres:   regroupement.totalCLR,
+      nbAlertsCritiques: alertes.nbCritiques,
+      nbLignesAExpedier: regroupement.totalLignes,
+      nbGroupesSuggeres: regroupement.totalCLR,
       meilleurPrestataire: prestataires.meilleur?.nom || null,
     },
   };
@@ -498,7 +547,10 @@ async function getSuggestions(companyId) {
 // ─────────────────────────────────────────────────────────────
 function _formatDate(date) {
   return new Date(date).toLocaleString("fr-DZ", {
-    day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
   });
 }
 

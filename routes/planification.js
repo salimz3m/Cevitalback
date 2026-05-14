@@ -12,6 +12,7 @@ const {
   Plateforme,
   CLR,
   User,
+  Produit,
 } = require("../models");
 
 const CAN_PLANIF = ["admin", "planification"];
@@ -35,6 +36,36 @@ router.get(
                 model: Order,
                 as: "order",
                 attributes: ["id", "orderNumber", "status"],
+                include: [
+                  {
+                    model: OrderItem,
+                    as: "OrderItems",
+                    attributes: [
+                      "id",
+                      "productName",
+                      "quantity",
+                      "unit",
+                      "sku",
+                      "produitId",
+                    ],
+                    include: [
+                      {
+                        model: Produit,
+                        as: "produit",
+                        attributes: [
+                          "id",
+                          "sku",
+                          "nom",
+                          "poidsKg",
+                          "qteParCarton",
+                          "qteParPalette",
+                          "famille",
+                        ],
+                        required: false,
+                      },
+                    ],
+                  },
+                ],
               },
               {
                 model: Plateforme,
@@ -138,8 +169,17 @@ router.post(
   authorize(...CAN_PLANIF),
   async (req, res) => {
     try {
-      const { orderId, diapason, plateformeId, clrId, notes } = req.body;
-
+      const {
+        orderId,
+        diapason,
+        plateformeId,
+        clrId,
+        clrSourceId,
+        notes,
+        itemsSelectionnes,
+      } = req.body;
+      // Juste après le destructuring du body
+      console.log("body reçu:", JSON.stringify(req.body, null, 2));
       const session = await PlanifSession.findOne({
         where: { id: req.params.id, companyId: req.user.companyId },
       });
@@ -150,10 +190,8 @@ router.post(
           message: "Impossible de modifier une session validée ou envoyée",
         });
 
-      if (!["D1", "D2"].includes(diapason))
-        return res
-          .status(400)
-          .json({ message: "Diapason invalide (D1 ou D2)" });
+      if (!["D1", "D2", "D3", "D4", "D5"].includes(diapason))
+        return res.status(400).json({ message: "Diapason invalide" });
       if (diapason === "D1" && !plateformeId)
         return res
           .status(400)
@@ -199,12 +237,15 @@ router.post(
         sessionId: session.id,
         orderId,
         diapason,
-        plateformeId: diapason === "D1" ? plateformeId : null,
-        clrId,
+        plateformeId: ["D1", "D4", "D5"].includes(diapason)
+          ? plateformeId
+          : null,
+        clrId: diapason !== "D4" ? clrId : null,
+        clrSourceId: ["D3", "D5"].includes(diapason) ? clrSourceId : null,
         notes,
         statut: "PLANIFIEE",
+        itemsJson: itemsSelectionnes?.length > 0 ? itemsSelectionnes : null,
       });
-
       const ligneComplete = await LignePlanif.findByPk(ligne.id, {
         include: [
           { model: Order, as: "order", attributes: ["id", "orderNumber"] },
@@ -385,7 +426,34 @@ router.get(
           }),
         },
         include: [
-          { model: OrderItem, attributes: ["productName", "quantity", "unit"] },
+          {
+            model: OrderItem,
+            as: "OrderItems",
+            attributes: [
+              "id",
+              "productName",
+              "quantity",
+              "unit",
+              "sku",
+              "produitId",
+            ],
+            include: [
+              {
+                model: Produit,
+                as: "produit",
+                attributes: [
+                  "id",
+                  "sku",
+                  "nom",
+                  "poidsKg",
+                  "qteParCarton",
+                  "qteParPalette",
+                  "famille",
+                ],
+                required: false,
+              },
+            ],
+          },
         ],
         order: [["date", "ASC"]],
       });

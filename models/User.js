@@ -19,6 +19,10 @@ const User = sequelize.define(
     },
     name: { type: DataTypes.STRING },
     companyId: { type: DataTypes.INTEGER, allowNull: false },
+    invitationToken: { type: DataTypes.STRING, allowNull: true },
+    invitationExpiry: { type: DataTypes.DATE, allowNull: true },
+    lastLogin: { type: DataTypes.DATE, allowNull: true },
+    actif: { type: DataTypes.BOOLEAN, defaultValue: true },
   },
   { timestamps: true },
 );

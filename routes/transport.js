@@ -12,6 +12,9 @@ const {
   Order,
   OrderItem,
   User,
+  CLR,
+  Plateforme,
+  Produit,
 } = require("../models");
 
 // Rôles autorisés pour le module transport
@@ -84,8 +87,43 @@ router.get(
           {
             model: Order,
             as: "order",
-            include: [{ model: OrderItem, as: "OrderItems" }],
+            include: [
+              {
+                model: OrderItem,
+                as: "OrderItems",
+                attributes: [
+                  "id",
+                  "productName",
+                  "quantity",
+                  "unit",
+                  "sku",
+                  "produitId",
+                ],
+                include: [
+                  {
+                    model: Produit,
+                    as: "produit",
+                    attributes: [
+                      "id",
+                      "sku",
+                      "nom",
+                      "poidsKg",
+                      "qteParCarton",
+                      "qteParPalette",
+                      "famille",
+                    ],
+                    required: false,
+                  },
+                ],
+              },
+            ],
           },
+          {
+            model: CLR,
+            as: "clr",
+            attributes: ["id", "code", "nom", "wilaya", "region"],
+          },
+          { model: Plateforme, as: "plateforme", attributes: ["id", "nom"] },
         ],
       });
 
@@ -425,11 +463,55 @@ router.get(
             as: "lignes",
             where: { statut: ["PLANIFIEE", "ENVOYEE_TRANSPORT"] },
             required: true,
+            attributes: [
+              "id",
+              "sessionId",
+              "orderId",
+              "diapason",
+              "clrId",
+              "plateformeId",
+              "statut",
+              "itemsJson",
+            ],
             include: [
               {
                 model: Order,
                 as: "order",
                 attributes: ["id", "orderNumber", "status"],
+                include: [
+                  {
+                    model: OrderItem,
+                    as: "OrderItems",
+                    attributes: [
+                      "id",
+                      "productName",
+                      "quantity",
+                      "unit",
+                      "sku",
+                      "produitId",
+                    ],
+                    include: [
+                      {
+                        model: Produit,
+                        as: "produit",
+                        attributes: [
+                          "id",
+                          "sku",
+                          "nom",
+                          "poidsKg",
+                          "qteParCarton",
+                          "qteParPalette",
+                        ],
+                        required: false,
+                      },
+                    ],
+                  },
+                ],
+              },
+              {
+                model: CLR,
+                as: "clr",
+                attributes: ["id", "code", "nom", "wilaya"],
               },
             ],
           },
