@@ -14,15 +14,7 @@ router.get("/verify-invitation", async (req, res) => {
   try {
     const user = await User.findOne({
       where: { invitationToken: token },
-      attributes: [
-        "id",
-        "email",
-        "nom",
-        "prenom",
-        "role",
-        "invitationExpiry",
-        "actif",
-      ],
+      attributes: ["id", "email", "name", "role", "invitationExpiry", "actif"],
     });
 
     if (!user) {
@@ -39,8 +31,8 @@ router.get("/verify-invitation", async (req, res) => {
 
     res.json({
       email: user.email,
-      nom: user.nom,
-      prenom: user.prenom,
+      nom: user.name,
+      prenom: "",
       role: user.role,
     });
   } catch (err) {
@@ -83,10 +75,20 @@ router.post("/register", async (req, res) => {
 
     const hash = await bcrypt.hash(password, 10);
 
+    // AVANT
     await user.update({
       password: hash,
       nom: nom?.trim() || user.nom,
       prenom: prenom?.trim() || user.prenom,
+      actif: true,
+      invitationToken: null,
+      invitationExpiry: null,
+    });
+
+    // APRÈS
+    await user.update({
+      password: hash,
+      name: `${prenom?.trim() || ""} ${nom?.trim() || ""}`.trim() || user.name,
       actif: true,
       invitationToken: null,
       invitationExpiry: null,

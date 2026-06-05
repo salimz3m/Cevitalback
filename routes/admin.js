@@ -5,7 +5,7 @@ const express = require("express");
 const router = express.Router();
 const { User, Company, CompanyModule, AuditLog } = require("../models");
 const { authenticate, authorize } = require("../middleware/auth");
-const { logAction } = require("../utils/audit");
+const { log: logAction } = require("../utils/audit");
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 

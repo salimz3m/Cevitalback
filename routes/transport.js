@@ -22,6 +22,63 @@ const CAN_TRANSPORT = ["admin", "transport"];
 const CAN_PLANIF = ["admin", "planification", "transport"];
 
 // ─────────────────────────────────────────────────────────────
+// HELPER — hydrate les items libres dans itemsJson
+// Reçoit un tableau de lignes (toJSON() déjà appelé ou non)
+// Retourne un tableau de lignes avec produit injecté dans
+// chaque item libre : { ...ij, produit: { poidsKg, ... } }
+// ─────────────────────────────────────────────────────────────
+async function hydraterLibres(lignes) {
+  // Collecter tous les produitIds des items libres
+  const produitIds = [];
+  lignes.forEach((l) => {
+    const items = Array.isArray(l.itemsJson)
+      ? l.itemsJson
+      : l.itemsJson
+        ? JSON.parse(l.itemsJson)
+        : [];
+    items.forEach((ij) => {
+      if (ij.libre && ij.produitId) produitIds.push(ij.produitId);
+    });
+  });
+
+  let produitsMap = {};
+  if (produitIds.length > 0) {
+    const prods = await Produit.findAll({
+      where: { id: [...new Set(produitIds)] },
+      attributes: [
+        "id",
+        "sku",
+        "nom",
+        "poidsKg",
+        "qteParCarton",
+        "qteParPalette",
+        "famille",
+      ],
+    });
+    prods.forEach((p) => {
+      produitsMap[p.id] = p.toJSON();
+    });
+  }
+
+  // Injecter dans chaque ligne
+  return lignes.map((l) => {
+    const lj = typeof l.toJSON === "function" ? l.toJSON() : { ...l };
+    const items = Array.isArray(lj.itemsJson)
+      ? lj.itemsJson
+      : lj.itemsJson
+        ? JSON.parse(lj.itemsJson)
+        : [];
+    lj.itemsJson = items.map((ij) => {
+      if (ij.libre && ij.produitId && produitsMap[ij.produitId]) {
+        return { ...ij, produit: produitsMap[ij.produitId] };
+      }
+      return ij;
+    });
+    return lj;
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
 // GET /api/transport/ordres
 // Liste tous les ordres de transport de la company
 // ─────────────────────────────────────────────────────────────
@@ -81,7 +138,7 @@ router.get(
       if (!ordre) return res.status(404).json({ message: "Ordre introuvable" });
 
       // Récupérer les lignes de planif associées
-      const lignes = await LignePlanif.findAll({
+      const lignesBrutes = await LignePlanif.findAll({
         where: { id: ordre.lignesPlanifIds },
         include: [
           {
@@ -126,6 +183,9 @@ router.get(
           { model: Plateforme, as: "plateforme", attributes: ["id", "nom"] },
         ],
       });
+
+      // ── PATCH : hydrater les items libres dans itemsJson ──
+      const lignes = await hydraterLibres(lignesBrutes);
 
       res.json({ ...ordre.toJSON(), lignesPlanif: lignes });
     } catch (err) {
@@ -519,7 +579,53 @@ router.get(
         order: [["date", "DESC"]],
       });
 
-      res.json(sessions);
+      // ── PATCH : hydrater les items libres dans itemsJson
+      // pour chaque ligne de chaque session
+      const sessionsJson = sessions.map((s) => s.toJSON());
+
+      // Collecter tous les produitIds libres toutes sessions confondues
+      const produitIds = [];
+      sessionsJson.forEach((s) =>
+        (s.lignes || []).forEach((l) =>
+          (Array.isArray(l.itemsJson) ? l.itemsJson : []).forEach((ij) => {
+            if (ij.libre && ij.produitId) produitIds.push(ij.produitId);
+          }),
+        ),
+      );
+
+      let produitsMap = {};
+      if (produitIds.length > 0) {
+        const prods = await Produit.findAll({
+          where: { id: [...new Set(produitIds)] },
+          attributes: [
+            "id",
+            "sku",
+            "nom",
+            "poidsKg",
+            "qteParCarton",
+            "qteParPalette",
+            "famille",
+          ],
+        });
+        prods.forEach((p) => {
+          produitsMap[p.id] = p.toJSON();
+        });
+      }
+
+      // Injecter dans itemsJson de chaque ligne
+      sessionsJson.forEach((s) =>
+        (s.lignes || []).forEach((l) => {
+          const items = Array.isArray(l.itemsJson) ? l.itemsJson : [];
+          l.itemsJson = items.map((ij) => {
+            if (ij.libre && ij.produitId && produitsMap[ij.produitId]) {
+              return { ...ij, produit: produitsMap[ij.produitId] };
+            }
+            return ij;
+          });
+        }),
+      );
+
+      res.json(sessionsJson);
     } catch (err) {
       console.error(err);
       res.status(500).json({ message: "Erreur serveur" });

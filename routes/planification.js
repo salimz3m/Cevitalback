@@ -162,7 +162,7 @@ router.post(
   },
 );
 
-// POST /api/planification/sessions/:id/lignes  [CORRIGÉ — Bug #3]
+// POST /api/planification/sessions/:id/lignes
 router.post(
   "/sessions/:id/lignes",
   authenticate,
@@ -178,64 +178,100 @@ router.post(
         notes,
         itemsSelectionnes,
       } = req.body;
-      // Juste après le destructuring du body
-      console.log("body reçu:", JSON.stringify(req.body, null, 2));
+
       const session = await PlanifSession.findOne({
         where: { id: req.params.id, companyId: req.user.companyId },
       });
       if (!session)
         return res.status(404).json({ message: "Session introuvable" });
       if (session.statut !== "BROUILLON")
-        return res.status(400).json({
-          message: "Impossible de modifier une session validée ou envoyée",
-        });
+        return res.status(400).json({ message: "Session non modifiable" });
 
       if (!["D1", "D2", "D3", "D4", "D5"].includes(diapason))
         return res.status(400).json({ message: "Diapason invalide" });
       if (diapason === "D1" && !plateformeId)
-        return res
-          .status(400)
-          .json({ message: "Diapason D1 requiert une plateforme" });
+        return res.status(400).json({ message: "Plateforme requise pour D1" });
 
-      const order = await Order.findOne({
-        where: { id: orderId, companyId: req.user.companyId },
-      });
-      if (!order)
-        return res.status(404).json({ message: "Commande introuvable" });
+      // ✅ orderId optionnel
+      let order = null;
+      if (orderId) {
+        order = await Order.findOne({
+          where: { id: orderId, companyId: req.user.companyId },
+        });
+        if (!order)
+          return res.status(404).json({ message: "Commande introuvable" });
+      }
 
-      const clr = await CLR.findByPk(clrId);
-      if (!clr) return res.status(404).json({ message: "CLR introuvable" });
+      // ✅ CLR requis sauf D4
+      if (diapason !== "D4") {
+        const clr = await CLR.findByPk(clrId);
+        if (!clr) return res.status(404).json({ message: "CLR introuvable" });
+      }
 
-      if (diapason === "D1") {
+      if (["D1", "D4", "D5"].includes(diapason)) {
         const plat = await Plateforme.findByPk(plateformeId);
         if (!plat)
           return res.status(404).json({ message: "Plateforme introuvable" });
       }
 
-      // ✅ BUG #3 CORRIGÉ — vérification doublon inter-sessions
-      const doublonGlobal = await LignePlanif.findOne({
-        where: { orderId },
-        include: [
-          {
-            model: PlanifSession,
-            as: "session",
-            where: {
-              companyId: req.user.companyId,
-              statut: { [Op.in]: ["BROUILLON", "VALIDEE", "ENVOYEE"] },
+      // ✅ Vérification doublon uniquement si commande présente
+      if (orderId) {
+        const doublonGlobal = await LignePlanif.findOne({
+          where: { orderId },
+          include: [
+            {
+              model: PlanifSession,
+              as: "session",
+              where: {
+                companyId: req.user.companyId,
+                statut: { [Op.in]: ["BROUILLON", "VALIDEE", "ENVOYEE"] },
+              },
+              required: true,
             },
-            required: true,
-          },
-        ],
-      });
-      if (doublonGlobal) {
-        return res.status(400).json({
-          message: `Cette commande est déjà planifiée (session #${doublonGlobal.sessionId})`,
+          ],
         });
+        if (doublonGlobal) {
+          return res.status(400).json({
+            message: `Commande déjà planifiée (session #${doublonGlobal.sessionId})`,
+          });
+        }
       }
+
+      // ✅ Valider qu'il y a au moins un item
+      if (!itemsSelectionnes || itemsSelectionnes.length === 0)
+        return res.status(400).json({ message: "Aucun article sélectionné" });
+      // PAR
+      const itemsJsonNormalise = await Promise.all(
+        itemsSelectionnes.map(async (item) => {
+          if (item.libre) {
+            return {
+              produitId: item.produitId,
+              quantitePlanifiee: item.quantitePlanifiee,
+              libre: true,
+              sku: item.sku ?? null,
+              nom: item.nom ?? null,
+              famille: item.famille ?? null,
+              poidsKg: item.poidsKg ?? null,
+              qteParCarton: item.qteParCarton ?? null,
+              qteParPalette: item.qteParPalette ?? null,
+            };
+          }
+          // Pour les non-libres : récupérer le produitId depuis OrderItem
+          const oi = await OrderItem.findByPk(item.orderItemId, {
+            attributes: ["produitId"],
+          });
+          return {
+            orderItemId: item.orderItemId,
+            quantitePlanifiee: item.quantitePlanifiee,
+            libre: false,
+            produitId: oi?.produitId ?? null, // ← ajout pour cohérence
+          };
+        }),
+      );
 
       const ligne = await LignePlanif.create({
         sessionId: session.id,
-        orderId,
+        orderId: orderId || null,
         diapason,
         plateformeId: ["D1", "D4", "D5"].includes(diapason)
           ? plateformeId
@@ -244,16 +280,24 @@ router.post(
         clrSourceId: ["D3", "D5"].includes(diapason) ? clrSourceId : null,
         notes,
         statut: "PLANIFIEE",
-        itemsJson: itemsSelectionnes?.length > 0 ? itemsSelectionnes : null,
+        itemsJson: itemsJsonNormalise,
       });
+
       const ligneComplete = await LignePlanif.findByPk(ligne.id, {
         include: [
-          { model: Order, as: "order", attributes: ["id", "orderNumber"] },
           {
-            model: Plateforme,
-            as: "plateforme",
-            attributes: ["id", "nom", "region"],
+            model: Order,
+            as: "order",
+            attributes: ["id", "orderNumber"],
+            include: [
+              {
+                model: OrderItem,
+                as: "OrderItems",
+                attributes: ["id", "productName", "quantity", "unit", "sku"],
+              },
+            ],
           },
+          { model: Plateforme, as: "plateforme", attributes: ["id", "nom"] },
           {
             model: CLR,
             as: "clr",
@@ -265,7 +309,7 @@ router.post(
       await log(
         req.user.id,
         "PLANIF_LIGNE_AJOUTEE",
-        `Commande ${order.orderNumber} → ${diapason} → CLR ${clr.code}`,
+        `Ligne ajoutée → ${diapason}${order ? ` — commande ${order.orderNumber}` : " — sans commande"}`,
       );
 
       res.status(201).json(ligneComplete);
@@ -276,6 +320,148 @@ router.post(
   },
 );
 
+// ✅ PUT /api/planification/sessions/:id/lignes/:ligneId  (ROUTE MANQUANTE)
+router.put(
+  "/sessions/:id/lignes/:ligneId",
+  authenticate,
+  authorize(...CAN_PLANIF),
+  async (req, res) => {
+    try {
+      const {
+        orderId,
+        diapason,
+        plateformeId,
+        clrId,
+        clrSourceId,
+        notes,
+        itemsSelectionnes,
+      } = req.body;
+
+      const session = await PlanifSession.findOne({
+        where: { id: req.params.id, companyId: req.user.companyId },
+      });
+      if (!session)
+        return res.status(404).json({ message: "Session introuvable" });
+
+      // ✅ BROUILLON et VALIDÉE sont modifiables
+      if (!["BROUILLON", "VALIDEE"].includes(session.statut))
+        return res.status(400).json({ message: "Session non modifiable" });
+
+      const ligne = await LignePlanif.findOne({
+        where: { id: req.params.ligneId, sessionId: session.id },
+      });
+      if (!ligne) return res.status(404).json({ message: "Ligne introuvable" });
+
+      if (!["D1", "D2", "D3", "D4", "D5"].includes(diapason))
+        return res.status(400).json({ message: "Diapason invalide" });
+
+      // ✅ orderId optionnel
+      if (orderId) {
+        const order = await Order.findOne({
+          where: { id: orderId, companyId: req.user.companyId },
+        });
+        if (!order)
+          return res.status(404).json({ message: "Commande introuvable" });
+
+        // Doublon : exclure la ligne elle-même
+        const doublon = await LignePlanif.findOne({
+          where: { orderId, id: { [Op.ne]: ligne.id } },
+          include: [
+            {
+              model: PlanifSession,
+              as: "session",
+              where: {
+                companyId: req.user.companyId,
+                statut: { [Op.in]: ["BROUILLON", "VALIDEE", "ENVOYEE"] },
+              },
+              required: true,
+            },
+          ],
+        });
+        if (doublon)
+          return res.status(400).json({
+            message: `Commande déjà planifiée (session #${doublon.sessionId})`,
+          });
+      }
+
+      if (!itemsSelectionnes || itemsSelectionnes.length === 0)
+        return res.status(400).json({ message: "Aucun article sélectionné" });
+      // PAR
+      const itemsJsonNormalise = await Promise.all(
+        itemsSelectionnes.map(async (item) => {
+          if (item.libre) {
+            return {
+              produitId: item.produitId,
+              quantitePlanifiee: item.quantitePlanifiee,
+              libre: true,
+              sku: item.sku ?? null,
+              nom: item.nom ?? null,
+              famille: item.famille ?? null,
+              poidsKg: item.poidsKg ?? null,
+              qteParCarton: item.qteParCarton ?? null,
+              qteParPalette: item.qteParPalette ?? null,
+            };
+          }
+          const oi = await OrderItem.findByPk(item.orderItemId, {
+            attributes: ["produitId"],
+          });
+          return {
+            orderItemId: item.orderItemId,
+            quantitePlanifiee: item.quantitePlanifiee,
+            libre: false,
+            produitId: oi?.produitId ?? null,
+          };
+        }),
+      );
+
+      await ligne.update({
+        orderId: orderId || null,
+        diapason,
+        plateformeId: ["D1", "D4", "D5"].includes(diapason)
+          ? plateformeId
+          : null,
+        clrId: diapason !== "D4" ? clrId : null,
+        clrSourceId: ["D3", "D5"].includes(diapason) ? clrSourceId : null,
+        notes,
+        itemsJson: itemsJsonNormalise,
+      });
+
+      const ligneComplete = await LignePlanif.findByPk(ligne.id, {
+        include: [
+          {
+            model: Order,
+            as: "order",
+            attributes: ["id", "orderNumber"],
+            include: [
+              {
+                model: OrderItem,
+                as: "OrderItems",
+                attributes: ["id", "productName", "quantity", "unit", "sku"],
+              },
+            ],
+          },
+          { model: Plateforme, as: "plateforme", attributes: ["id", "nom"] },
+          {
+            model: CLR,
+            as: "clr",
+            attributes: ["id", "code", "nom", "wilaya"],
+          },
+        ],
+      });
+
+      await log(
+        req.user.id,
+        "PLANIF_LIGNE_MODIFIEE",
+        `Ligne #${ligne.id} modifiée`,
+      );
+
+      res.json(ligneComplete);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: "Erreur serveur" });
+    }
+  },
+);
 // DELETE /api/planification/sessions/:id/lignes/:ligneId
 router.delete(
   "/sessions/:id/lignes/:ligneId",
@@ -288,7 +474,8 @@ router.delete(
       });
       if (!session)
         return res.status(404).json({ message: "Session introuvable" });
-      if (session.statut !== "BROUILLON")
+      if (!["BROUILLON", "VALIDEE"].includes(session.statut))
+        // ← après
         return res
           .status(400)
           .json({ message: "Impossible de modifier une session validée" });

@@ -24,10 +24,6 @@ const { Op } = require("sequelize");
 
 // ─────────────────────────────────────────────────────────────
 // HELPER : résoudre produitId depuis productName (OrderItem)
-// Cherche par nom exact puis par SKU partiel
-// ─────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────
-// HELPER : résoudre produitId depuis productName (OrderItem)
 // Cherche par nom exact, SKU, aliases PostgreSQL, puis ILIKE
 // ─────────────────────────────────────────────────────────────
 async function _resoudreProduit(productName, companyId, transaction) {
@@ -90,6 +86,7 @@ async function _resoudreProduit(productName, companyId, transaction) {
   console.warn(`[stockService] Aucun produit trouvé pour: "${productName}"`);
   return null;
 }
+
 // ─────────────────────────────────────────────────────────────
 // HELPER : écrire un mouvement + mettre à jour StockCLR
 // ─────────────────────────────────────────────────────────────
@@ -192,76 +189,152 @@ async function confirmerLivraison(ordreId, userId, companyId) {
     if (lignesIds.length === 0)
       throw new Error("Aucune ligne de planification associée");
 
+    // ── Modification 1 : include OrderItem → produit pour avoir produitId ──
     const lignes = await LignePlanif.findAll({
       where: { id: lignesIds },
       include: [
         {
           model: Order,
           as: "order",
-          include: [{ model: OrderItem, as: "OrderItems" }],
+          include: [
+            {
+              model: OrderItem,
+              as: "OrderItems",
+              include: [
+                {
+                  model: Produit,
+                  as: "produit",
+                  attributes: ["id", "sku", "nom"],
+                  required: false,
+                },
+              ],
+            },
+          ],
         },
       ],
       transaction,
     });
 
-    // Agréger quantités par produit
-    const mouvements = {}; // { productName: { qty, unit } }
+    // ── Modification 2 : agréger par produitId, couvre libres ET normaux ──
+    // { produitId: { qty, productName, sku } }
+    const mouvements = {};
+
     for (const ligne of lignes) {
-      // Juste avant : for (const [productName, { qty }] of Object.entries(mouvements))
-      console.log(
-        `[confirmerLivraison] ${Object.keys(mouvements).length} produits à traiter:`,
-        Object.entries(mouvements).map(([n, { qty }]) => `${n} × ${qty}`),
-      );
-      for (const item of ligne.order?.OrderItems || []) {
-        const k = item.productName;
-        if (!mouvements[k])
-          mouvements[k] = { qty: 0, unit: item.unit || "unité" };
-        mouvements[k].qty += item.quantity || 0;
+      const itemsJson = Array.isArray(ligne.itemsJson) ? ligne.itemsJson : [];
+
+      if (itemsJson.length > 0) {
+        // ── Cas planifié avec sélection : utiliser itemsJson ──
+        for (const ij of itemsJson) {
+          if (ij.libre) {
+            // Produit libre : produitId directement dans itemsJson
+            const pid = ij.produitId;
+            if (!pid) {
+              console.warn(
+                `[confirmerLivraison] item libre sans produitId — ignoré`,
+                ij,
+              );
+              continue;
+            }
+            if (!mouvements[pid])
+              mouvements[pid] = { qty: 0, productName: ij.nom, sku: ij.sku };
+            mouvements[pid].qty += ij.quantitePlanifiee || 0;
+          } else {
+            // Item commande planifié : récupérer produitId via OrderItem
+            const orderItem = (ligne.order?.OrderItems || []).find(
+              (i) => i.id === ij.orderItemId,
+            );
+            const pid = orderItem?.produitId ?? orderItem?.produit?.id;
+            if (!pid) {
+              // Fallback par nom si produitId absent
+              const produit = await _resoudreProduit(
+                orderItem?.productName,
+                companyId,
+                transaction,
+              );
+              if (produit) {
+                if (!mouvements[produit.id])
+                  mouvements[produit.id] = {
+                    qty: 0,
+                    productName: orderItem?.productName,
+                    sku: produit.sku,
+                  };
+                mouvements[produit.id].qty += ij.quantitePlanifiee || 0;
+              }
+              continue;
+            }
+            if (!mouvements[pid])
+              mouvements[pid] = {
+                qty: 0,
+                productName: orderItem?.productName,
+                sku: orderItem?.produit?.sku,
+              };
+            mouvements[pid].qty += ij.quantitePlanifiee || 0;
+          }
+        }
+      } else {
+        // ── Cas sans itemsJson : fallback sur tous les OrderItems ──
+        for (const item of ligne.order?.OrderItems || []) {
+          const pid = item.produitId ?? item.produit?.id;
+          if (pid) {
+            if (!mouvements[pid])
+              mouvements[pid] = {
+                qty: 0,
+                productName: item.productName,
+                sku: item.produit?.sku,
+              };
+            mouvements[pid].qty += item.quantity || 0;
+          } else {
+            // Dernier fallback par nom
+            const produit = await _resoudreProduit(
+              item.productName,
+              companyId,
+              transaction,
+            );
+            if (produit) {
+              if (!mouvements[produit.id])
+                mouvements[produit.id] = {
+                  qty: 0,
+                  productName: item.productName,
+                  sku: produit.sku,
+                };
+              mouvements[produit.id].qty += item.quantity || 0;
+            }
+          }
+        }
       }
     }
 
+    console.log(
+      `[confirmerLivraison] ${Object.keys(mouvements).length} produits à traiter:`,
+      Object.entries(mouvements).map(
+        ([pid, { qty, sku }]) => `${sku ?? pid} × ${qty}`,
+      ),
+    );
+
     const details = [];
 
-    for (const [productName, { qty }] of Object.entries(mouvements)) {
-      // Résoudre le produit dans le catalogue
-      const produit = await _resoudreProduit(
-        productName,
+    // ── Modification 3 : produitId déjà résolu, pas besoin de _resoudreProduit ──
+    for (const [produitId, { qty, productName, sku }] of Object.entries(
+      mouvements,
+    )) {
+      const result = await _appliquerMouvement({
+        produitId: parseInt(produitId),
+        clrId: ordre.clrId,
         companyId,
+        type: "ENTREE_LIVRAISON",
+        quantite: qty,
+        referenceType: "ORDRE_TRANSPORT",
+        referenceId: ordre.id,
+        userId,
+        notes: `Livraison ordre #${ordre.id}`,
         transaction,
-      );
-
-      if (produit) {
-        // Produit catalogué → mise à jour StockCLR
-        const result = await _appliquerMouvement({
-          produitId: produit.id,
-          clrId: ordre.clrId,
-          companyId,
-          type: "ENTREE_LIVRAISON",
-          quantite: qty,
-          referenceType: "ORDRE_TRANSPORT",
-          referenceId: ordre.id,
-          userId,
-          notes: `Livraison ordre #${ordre.id}`,
-          transaction,
-        });
-        details.push({
-          ...result,
-          productName,
-          sku: produit.sku,
-          catalogué: true,
-        });
-      } else {
-        // Produit non catalogué → créer à la volée + avertissement
-        console.warn(
-          `[stockService] Produit non catalogué: "${productName}" — ajout brut`,
-        );
-        details.push({
-          productName,
-          ancienneQte: 0,
-          nouvelleQte: qty,
-          catalogué: false,
-        });
-      }
+      });
+      details.push({
+        ...result,
+        productName,
+        sku,
+        catalogué: true,
+      });
     }
 
     // Passer l'ordre en LIVRE

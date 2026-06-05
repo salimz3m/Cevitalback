@@ -7,7 +7,7 @@ const LignePlanif = sequelize.define(
   {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     sessionId: { type: DataTypes.INTEGER, allowNull: false },
-    orderId: { type: DataTypes.INTEGER, allowNull: false },
+    orderId: { type: DataTypes.INTEGER, allowNull: true },
 
     diapason: {
       type: DataTypes.STRING(2),
